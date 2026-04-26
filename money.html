@@ -1,0 +1,646 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { 
+  TrendingUp, TrendingDown, 
+  Send, MessageSquare, LayoutDashboard, PencilLine, 
+  Calendar as CalendarIcon, Upload, Download,
+  Heart, CloudRain, Waves, BarChart3, Settings2, Plus, X
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, updateDoc, collection, addDoc, query, orderBy, limit, getDocs } from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'ning-bear-sea-ledger';
+
+// --- Gemini API Configuration ---
+const apiKey = ""; 
+const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
+
+// --- Helpers ---
+const getLocalDateString = () => {
+  const now = new Date();
+  const offset = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - (offset * 60 * 1000));
+  return local.toISOString().split('T')[0];
+};
+
+const normalizeDate = (dateStr) => {
+  const fallback = getLocalDateString();
+  if (!dateStr || typeof dateStr !== 'string') return fallback;
+  if (dateStr.includes('YYYY')) return fallback; 
+  
+  let normalized = dateStr.replace(/[\/\.]/g, '-');
+  const parts = normalized.split('-');
+  if (parts.length === 3) {
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      const d = parseInt(parts[2], 10);
+      if (isNaN(y) || isNaN(m) || isNaN(d)) return fallback;
+      return `${y}-${m.toString().padStart(2, '0')}-${d.toString().padStart(2, '0')}`;
+  }
+  return fallback;
+};
+
+const OPENING_LINES = [
+  "醒了？茶剛泡好，小心燙。(順手把桌上的帳本挪開) 帳我對過了，都沒錯。",
+  "今天外面太陽不錯，晚點我們去沙灘走走？(正在把記好的帳頁夾進夾子) 妳想記的項目我都寫好了。",
+  "熊，看這裡。(指了指帳本上的一筆紀錄) 這個月我們過得還挺精彩的，不知不覺也存了不少，對吧？",
+  "剛才去買菜，順便把早上的開銷也記了。(合上帳本，笑著看妳) 晚上想吃什麼？我來做。",
+  "這幾天的帳目我理了一下，沒什麼特別的。(遞過一塊洗好的水果) 慢慢來，不用一次看完。"
+];
+
+// --- Components ---
+
+const Avatar = ({ type }) => {
+  if (type === 'ning') {
+    return (
+      <svg viewBox="0 0 100 100" className="w-full h-full p-1 drop-shadow-sm" strokeLinecap="round" strokeLinejoin="round">
+        <g transform="scale(1.3) translate(-11, -12)">
+          <path d="M20 60 Q 50 85 80 60" fill="#f1f5f9" stroke="#475569" strokeWidth="2.5" />
+          <path d="M50 60 L 50 20" fill="none" stroke="#475569" strokeWidth="2.5" />
+          <path d="M52 23 Q 90 45 52 58 Z" fill="#bae6fd" stroke="#475569" strokeWidth="2.5" opacity="0.9" />
+          <circle cx="85" cy="20" r="3" fill="#fcd34d" stroke="#475569" strokeWidth="1" />
+        </g>
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 100 100" className="w-full h-full p-1 drop-shadow-sm" strokeLinecap="round" strokeLinejoin="round">
+      <g transform="scale(1.2) translate(-8, -8)">
+        <circle cx="25" cy="35" r="9" fill="#f1f5f9" stroke="#475569" strokeWidth="2.5" />
+        <circle cx="75" cy="35" r="9" fill="#f1f5f9" stroke="#475569" strokeWidth="2.5" />
+        <circle cx="50" cy="55" r="32" fill="#f1f5f9" stroke="#475569" strokeWidth="2.5" />
+        <circle cx="38" cy="50" r="3" fill="#475569" />
+        <circle cx="62" cy="50" r="3" fill="#475569" />
+        <ellipse cx="50" cy="62" rx="12" ry="9" fill="none" stroke="#475569" strokeWidth="1.5" opacity="0.4" />
+        <path d="M46 60 Q 50 63 54 60" fill="none" stroke="#475569" strokeWidth="2" strokeLinecap="round" />
+        <circle cx="50" cy="58" r="3.5" fill="#475569" />
+        <path d="M25 60 L 30 63" stroke="#fca5a5" strokeWidth="3" opacity="0.6" />
+        <path d="M70 60 L 75 63" stroke="#fca5a5" strokeWidth="3" opacity="0.6" />
+      </g>
+    </svg>
+  );
+};
+
+const DoodleCard = ({ children, className = "" }) => (
+  <div className={`bg-[#fffbf0]/95 backdrop-blur-sm border-2 border-[#57534e] rounded-2xl shadow-[2px_2px_0px_0px_rgba(87,83,78,0.3)] md:shadow-[4px_4px_0px_0px_rgba(87,83,78,0.3)] flex flex-col overflow-hidden h-full w-full relative ${className}`}>
+    {children}
+  </div>
+);
+
+const SeaBackground = () => (
+  <div className="fixed inset-0 z-0 pointer-events-none">
+    <div className="absolute inset-0 bg-gradient-to-b from-[#a5d8ff] via-[#8ecae6] to-[#e6d5b8]" />
+    <div className="absolute inset-x-0 bottom-0 h-1/2 opacity-60" 
+         style={{
+           background: 'linear-gradient(180deg, rgba(33,158,188,0) 0%, rgba(33,158,188,0.4) 40%, rgba(255,183,3,0.2) 100%)',
+           filter: 'url(#turbulence)' 
+         }} 
+    />
+    <div className="absolute inset-0 opacity-40 mix-blend-overlay"
+         style={{
+            backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`
+         }}
+    />
+    <svg className="hidden">
+      <filter id="turbulence">
+        <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" result="noise" />
+        <feDisplacementMap in="SourceGraphic" in2="noise" scale="10" />
+      </filter>
+    </svg>
+  </div>
+);
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState('chat');
+  const [ledgerName, setLedgerName] = useState('小熊與舟的海邊手帳');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [isEditingTags, setIsEditingTags] = useState(false);
+  const [transactions, setTransactions] = useState([]);
+  const [tags, setTags] = useState(["🍎 水果", "🍱 午餐", "🥤 飲料", "🍽️ 晚餐", "🚌 交通", "🛍️ 購物"]);
+  const [newTagInput, setNewTagInput] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [inputText, setInputText] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [hasCheckedNewDay, setHasCheckedNewDay] = useState(false);
+  
+  const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const transactionsRef = useRef(transactions);
+
+  const todayDay = parseInt(getLocalDateString().split('-')[2], 10);
+  const curWeekIdx = Math.min(Math.ceil(todayDay / 7) - 1, 4);
+
+  useEffect(() => {
+    transactionsRef.current = transactions;
+  }, [transactions]);
+
+  // --- Auth & Data Sync ---
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const ledgerRef = doc(db, 'artifacts', appId, 'users', user.uid, 'ledger', 'main');
+    const unsubscribeLedger = onSnapshot(ledgerRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setTransactions((data.transactions || []).map(t => ({ ...t, amount: Number(t.amount) })));
+        setLedgerName(data.name || '小熊與舟的海邊手帳');
+        if (data.tags) setTags(data.tags);
+      } else {
+        setDoc(ledgerRef, { name: '小熊與舟的海邊手帳', transactions: [], tags: ["🍎 水果", "🍱 午餐", "🥤 飲料", "🍽️ 晚餐", "🚌 交通", "🛍️ 購物"] });
+      }
+    });
+    const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chat', 'history');
+    const unsubscribeChat = onSnapshot(chatRef, (snap) => {
+      if (snap.exists()) {
+        setMessages(snap.data().messages || []);
+      } else {
+        setDoc(chatRef, { messages: [] });
+      }
+    });
+    return () => { unsubscribeLedger(); unsubscribeChat(); };
+  }, [user]);
+
+  // --- Other Logic ---
+  const currentMonthData = useMemo(() => {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1;
+    return transactions.filter(t => {
+      if (!t.date) return false;
+      const [y, m] = normalizeDate(t.date).split('-').map(Number);
+      return y === currentYear && m === currentMonth;
+    });
+  }, [transactions]);
+
+  const stats = useMemo(() => {
+    const currentList = currentMonthData;
+    const total = currentList.reduce((acc, t) => acc + Number(t.amount), 0);
+    const inc = currentList.filter(t => t.amount > 0).reduce((acc, t) => acc + t.amount, 0);
+    const exp = Math.abs(currentList.filter(t => t.amount < 0).reduce((acc, t) => acc + t.amount, 0));
+
+    const weeklyExp = [0, 0, 0, 0, 0];
+    currentList.forEach(t => {
+      if (t.amount < 0) {
+        const day = parseInt(normalizeDate(t.date).split('-')[2], 10);
+        const weekIndex = Math.min(Math.ceil(day / 7) - 1, 4);
+        weeklyExp[weekIndex] += Math.abs(t.amount);
+      }
+    });
+
+    const maxWeeklyExp = Math.max(...weeklyExp, 1);
+
+    return { total, inc, exp, weeklyExp, maxWeeklyExp };
+  }, [currentMonthData]);
+
+  // --- New Day Check ---
+  useEffect(() => {
+    if (user && messages !== null && transactions.length >= 0 && !hasCheckedNewDay) {
+      const checkNewDay = async () => {
+        const todayStr = getLocalDateString();
+        const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+        const lastMsgDate = lastMsg?.fullDate || ""; 
+
+        if (lastMsgDate !== todayStr) {
+          const randomOpening = OPENING_LINES[Math.floor(Math.random() * OPENING_LINES.length)];
+          const statsMsg = `對了，這個月我們一起花了差不多 ${stats.exp.toLocaleString()}，目前的開銷紀錄我都在這裡理好了，給妳參考。`;
+          
+          const newBotMsg = {
+            id: Date.now(),
+            role: 'bot',
+            content: `${randomOpening}\n\n${statsMsg}`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            fullDate: todayStr 
+          };
+
+          const newHistory = [...messages, newBotMsg];
+          setMessages(newHistory);
+          setHasCheckedNewDay(true);
+          const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chat', 'history');
+          await setDoc(chatRef, { messages: newHistory }, { merge: true });
+        } else {
+          setHasCheckedNewDay(true);
+        }
+      };
+      checkNewDay();
+    }
+  }, [user, messages, transactions, stats.exp, hasCheckedNewDay]);
+
+  useEffect(() => {
+    if (view === 'chat') {
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    }
+  }, [messages, isTyping, view]);
+
+  const updateCloudLedger = async (n, t, currentTags) => { 
+    if (!user) return; 
+    const ledgerRef = doc(db, 'artifacts', appId, 'users', user.uid, 'ledger', 'main');
+    await setDoc(ledgerRef, { 
+      name: n, 
+      transactions: t.map(x => ({ ...x, amount: Number(x.amount) })),
+      tags: currentTags || tags
+    }, { merge: true }); 
+  };
+
+  const handleDelete = async (id) => { 
+    const updated = transactions.filter(t => t.id !== id); 
+    setTransactions(updated); 
+    await updateCloudLedger(ledgerName, updated, tags); 
+  };
+  
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const text = event.target.result;
+      const lines = text.split('\n');
+      const newTrans = [];
+      let count = 0;
+      const todayStr = getLocalDateString();
+      lines.forEach((line, idx) => {
+        if (idx === 0 && line.includes('日期')) return; 
+        const parts = line.split(',');
+        if (parts.length >= 3) {
+          const date = parts[0].trim();
+          const desc = parts[1].trim();
+          const amt = parseFloat(parts[parts.length - 1]);
+          if (!isNaN(amt)) {
+            newTrans.push({ id: Date.now() + count, date: normalizeDate(date || todayStr), text: desc || '匯入項目', amount: amt, type: amt >= 0 ? 'income' : 'expense' });
+            count++;
+          }
+        }
+      });
+      if (newTrans.length > 0) {
+        const merged = [...newTrans, ...transactions];
+        setTransactions(merged);
+        await updateCloudLedger(ledgerName, merged, tags);
+        const botMsg = { 
+          id: Date.now(), role: 'bot', 
+          content: `(拍了拍手上的灰塵，看著妳拿來的資料) 這些我來整理就好，妳快去休息。這 ${count} 筆資料我都寫進去啦。`, 
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          fullDate: todayStr
+        };
+        const newHistory = [...messages, botMsg];
+        setMessages(newHistory);
+        const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chat', 'history');
+        await setDoc(chatRef, { messages: newHistory }, { merge: true });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const askNing = async (msg, history) => {
+    setIsTyping(true);
+    const todayStr = getLocalDateString();
+    const system = `
+      角色：你是《一念關山》的寧遠舟（舟），性格沉穩但也帶點幽默，你是熊的男朋友，你們一起生活在海邊。
+      【重要環境資訊】
+      - 今天的日期是：${todayStr}
+      行為準則：
+      1. 【像個真人】：說話要自然、隨性，使用日常口語。
+      2. 【分享生活】：你是因為愛她才幫她記帳。對話要像是在客廳聊天。
+      3. 【記帳回饋】：如果熊在訊息中輸入了新的花費，請自然地提到這筆花費。請不要自己計算總額。
+      4. 【純聊天】：如果她只是純聊天，沒有要記帳，則完全不要提帳目。
+      5. 【動作描寫】：加入居家感的動作（用括號表示）。
+      JSON格式：
+      {
+        "reply": "你的回覆文字",
+        "data": [
+          { "text": "項目名稱", "amount": 數字(正數), "type": "expense", "date": "YYYY-MM-DD" }
+        ]
+      }
+    `;
+    const dialogueHistory = history.slice(-50).map(m => `${m.role === 'user' ? '熊' : '舟'}: ${m.content}`).join('\n');
+    const finalPrompt = `對話紀錄：\n${dialogueHistory}\n(針對最後一句話，像男朋友一樣自然地回應)`;
+
+    try {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: finalPrompt }] }], systemInstruction: { parts: [{ text: system }] }, generationConfig: { responseMimeType: "application/json" } })
+      });
+      const res = await resp.json();
+      const rawText = res.candidates[0].content.parts[0].text;
+      const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+      const obj = JSON.parse(cleanText);
+      
+      const botMsg = { 
+        id: Date.now(), role: 'bot', content: obj.reply, 
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        fullDate: getLocalDateString()
+      };
+      const newHistory = [...history, botMsg];
+      setMessages(newHistory);
+      const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chat', 'history');
+      await setDoc(chatRef, { messages: newHistory }, { merge: true });
+      
+      if (obj.data && Array.isArray(obj.data) && obj.data.length > 0) {
+        const newTrans = obj.data.map((item, index) => {
+          const amt = Math.abs(Number(item.amount) || 0);
+          const isExpense = item.type !== 'income';
+          return {
+            id: Date.now() + index, 
+            text: item.text || '雜項', 
+            amount: isExpense ? -amt : amt, 
+            type: isExpense ? 'expense' : 'income', 
+            date: normalizeDate(item.date || todayStr) 
+          };
+        });
+        const allT = [...newTrans, ...transactionsRef.current];
+        setTransactions(allT);
+        updateCloudLedger(ledgerName, allT, tags);
+      }
+    } catch (e) { console.error(e); } finally { setIsTyping(false); }
+  };
+
+  const handleSend = (e) => {
+    e.preventDefault();
+    if (!inputText.trim()) return;
+    const userMsg = { 
+      id: Date.now(), role: 'user', content: inputText, 
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      fullDate: getLocalDateString()
+    };
+    const updated = [...messages, userMsg];
+    setMessages(updated);
+    setInputText('');
+    askNing(userMsg.content, updated);
+  };
+
+  const handleAddTag = () => {
+    if (!newTagInput.trim()) return;
+    const updatedTags = [...tags, newTagInput.trim()];
+    setTags(updatedTags);
+    setNewTagInput('');
+    updateCloudLedger(ledgerName, transactions, updatedTags);
+  };
+
+  const handleDeleteTag = (index) => {
+    const updatedTags = tags.filter((_, i) => i !== index);
+    setTags(updatedTags);
+    updateCloudLedger(ledgerName, transactions, updatedTags);
+  };
+
+  // --- Views ---
+
+  const renderChatView = () => (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3 bg-[#fffbf0]/95 z-10 border-b border-[#e7e5e4] flex-none">
+         <div className="flex justify-between items-center bg-white/80 p-3 rounded-xl border border-[#d6d3d1] shadow-sm">
+            <div className="flex items-center gap-3">
+               <div className="p-1.5 bg-[#fee2e2] text-[#be123c] rounded-lg"><TrendingDown size={16} /></div>
+               <div>
+                  <p className="text-[10px] text-[#a8a29e] font-bold">本月目前出帳</p>
+                  <p className="text-sm font-black text-[#57534e] transition-all">${stats.exp.toLocaleString()}</p>
+               </div>
+            </div>
+            <div className="h-8 w-px bg-[#e7e5e4]"></div>
+            <div className="flex items-center gap-3">
+               <div>
+                  <p className="text-[10px] text-[#a8a29e] font-bold text-right">本週目前出帳</p>
+                  <p className="text-sm font-black text-[#57534e] transition-all text-right">${(stats.weeklyExp[curWeekIdx] || 0).toLocaleString()}</p>
+               </div>
+               <div className="p-1.5 bg-[#f5f5f4] text-[#78716c] rounded-lg"><CalendarIcon size={16} /></div>
+            </div>
+         </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar scroll-smooth">
+        {messages.map(m => (
+          <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`flex items-end gap-2 max-w-[85%] ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div className="w-10 h-10 rounded-full border border-[#a8a29e] bg-white overflow-hidden flex-shrink-0 p-0.5 shadow-sm"><Avatar type={m.role === 'user' ? 'bear' : 'ning'} /></div>
+              <div className={`px-4 py-3 rounded-2xl text-sm font-medium leading-relaxed shadow-sm border whitespace-pre-wrap ${m.role === 'user' ? 'bg-[#e7e5e4] text-[#44403c] border-[#d6d3d1] rounded-br-none' : 'bg-white text-[#44403c] border-[#e7e5e4] rounded-bl-none'}`}>
+                {m.content}
+                <span className="block text-[10px] mt-1 font-bold opacity-30 text-right">{m.timestamp}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+        {isTyping && (
+          <div className="flex justify-start items-end gap-2">
+            <div className="w-10 h-10 rounded-full border border-[#a8a29e] bg-white overflow-hidden p-0.5"><Avatar type="ning" /></div>
+            <div className="bg-white border border-[#e7e5e4] px-4 py-3 rounded-2xl rounded-bl-none flex gap-1 shadow-sm">
+              <div className="w-1.5 h-1.5 bg-[#78716c] rounded-full animate-bounce"></div>
+              <div className="w-1.5 h-1.5 bg-[#78716c] rounded-full animate-bounce [animation-delay:0.2s]"></div>
+              <div className="w-1.5 h-1.5 bg-[#78716c] rounded-full animate-bounce [animation-delay:0.4s]"></div>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} className="h-4" />
+      </div>
+
+      <form onSubmit={handleSend} className="flex-none p-3 pb-5 border-t border-[#e7e5e4] bg-[#fffbf0]/50 backdrop-blur-md z-20">
+        <div className="flex gap-2 px-1 pb-3 overflow-x-auto custom-scrollbar whitespace-nowrap">
+          {tags.map((tag, idx) => (
+            <button
+              key={idx} type="button" onClick={() => setInputText(prev => prev + tag + " ")}
+              className="flex-none px-3 py-1.5 bg-white/80 border border-[#d6d3d1] text-[#78716c] rounded-full text-xs font-bold hover:bg-[#e7e5e4] hover:text-[#57534e] transition-colors shadow-sm active:scale-95"
+            >
+              {tag}
+            </button>
+          ))}
+          {tags.length === 0 && (
+             <span className="text-[10px] text-[#a8a29e] font-bold py-1.5 italic">去帳本頁面點擊「齒輪」自定義標籤喔</span>
+          )}
+        </div>
+        <div className="flex gap-2 relative">
+          <div className="relative flex-1">
+            <input
+              type="text" value={inputText} onChange={(e) => setInputText(e.target.value)}
+              placeholder="記筆帳，或是聊聊天..."
+              className="w-full pl-4 pr-10 py-3 bg-white/80 rounded-xl border border-[#d6d3d1] focus:border-[#78716c] focus:ring-1 focus:ring-[#78716c] outline-none transition-all font-medium text-[#57534e]"
+              disabled={isTyping}
+            />
+            <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt" />
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="absolute right-2 top-2.5 p-1 text-[#a8a29e] hover:text-[#78716c] transition-colors"><Upload size={18} /></button>
+          </div>
+          <button type="submit" disabled={!inputText.trim() || isTyping} className="flex-none p-3 bg-[#57534e] text-[#f5f5f4] rounded-xl hover:bg-[#44403c] active:scale-95 transition-all shadow-md"><Send size={18} /></button>
+        </div>
+      </form>
+    </div>
+  );
+
+  const renderLedgerView = () => (
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar pb-24">
+         <div className="flex justify-between items-center border-b border-[#e7e5e4] pb-4">
+          <div onClick={() => setIsEditingName(true)} className="flex items-center gap-2 group cursor-pointer max-w-[60%]">
+            {isEditingName ? (
+              <input autoFocus className="bg-transparent outline-none font-bold text-lg text-[#57534e] border-b border-[#78716c] w-full" value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} onBlur={() => {setIsEditingName(false); updateCloudLedger(ledgerName, transactions, tags);}} onKeyDown={(e) => e.key === 'Enter' && setIsEditingName(false)} />
+            ) : (
+              <><h2 className="text-xl font-bold text-[#57534e] truncate tracking-wide">{ledgerName}</h2><PencilLine size={16} className="text-[#a8a29e] flex-shrink-0" /></>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+             <button onClick={() => setIsEditingTags(!isEditingTags)} className={`p-1.5 rounded-lg transition-colors ${isEditingTags ? 'bg-[#57534e] text-white' : 'text-[#a8a29e] hover:text-[#78716c]'}`}><Settings2 size={20} /></button>
+             <button onClick={() => {
+                 const csv = "\ufeff日期,項目,類型,金額\n" + transactions.map(t => `${t.date},${t.text},${t.type === 'income' ? '收入' : '支出'},${t.amount}`).join("\n");
+                 const link = document.createElement("a");
+                 link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+                 link.download = `${ledgerName}.csv`;
+                 link.click();
+             }} className="text-[#a8a29e] hover:text-[#78716c] transition-colors"><Download size={20} /></button>
+          </div>
+        </div>
+        
+        {/* 標籤管理介面 */}
+        {isEditingTags && (
+           <div className="bg-[#fffbeb] border-2 border-dashed border-[#d6d3d1] rounded-xl p-4 animate-in fade-in slide-in-from-top-2">
+              <div className="flex justify-between items-center mb-3">
+                 <h4 className="text-xs font-black text-[#78716c] uppercase tracking-widest flex items-center gap-2">自定義標籤管理</h4>
+                 <button onClick={() => setIsEditingTags(false)} className="text-[#a8a29e] hover:text-rose-500"><X size={16}/></button>
+              </div>
+              <div className="flex flex-wrap gap-2 mb-4">
+                 {tags.map((tag, i) => (
+                    <div key={i} className="bg-white border border-[#d6d3d1] pl-3 pr-1 py-1 rounded-full flex items-center gap-2 text-xs font-bold text-[#57534e] shadow-sm">
+                       {tag}
+                       <button onClick={() => handleDeleteTag(i)} className="p-1 text-[#a8a29e] hover:text-rose-500 rounded-full hover:bg-rose-50"><X size={12}/></button>
+                    </div>
+                 ))}
+                 {tags.length === 0 && <p className="text-[10px] text-[#a8a29e] font-bold py-2">目前沒有標籤，增加一個吧！</p>}
+              </div>
+              <div className="flex gap-2">
+                 <input 
+                    type="text" placeholder="輸入新標籤..." value={newTagInput} onChange={(e) => setNewTagInput(e.target.value)}
+                    className="flex-1 bg-white border border-[#d6d3d1] rounded-lg px-3 py-1.5 text-xs font-bold outline-none focus:border-[#78716c]"
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddTag()}
+                 />
+                 <button onClick={handleAddTag} className="bg-[#57534e] text-white px-3 py-1.5 rounded-lg flex items-center gap-1 text-xs font-bold active:scale-95 transition-all"><Plus size={14}/> 增加</button>
+              </div>
+           </div>
+        )}
+
+        <div className="relative">
+          <div className="bg-white/60 backdrop-blur-md border border-[#d6d3d1] rounded-xl p-6 shadow-sm">
+            <div className="text-center mb-6">
+              <p className="text-xs font-bold text-[#a8a29e] uppercase tracking-widest mb-1">本月結餘</p>
+              <h3 className="text-5xl font-serif font-black text-[#57534e] tracking-tight">${stats.total.toLocaleString()}</h3>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-[#f0fdf4]/80 p-3 rounded-lg border border-[#dcfce7]">
+                <div className="flex items-center gap-1 text-[#15803d] font-bold text-xs mb-1"><TrendingUp size={12}/> 本月進帳</div>
+                <p className="text-lg md:text-xl font-bold text-[#44403c]">${stats.inc.toLocaleString()}</p>
+              </div>
+              <div className="bg-[#fef2f2]/80 p-3 rounded-lg border border-[#fee2e2]">
+                <div className="flex items-center gap-1 text-[#be123c] font-bold text-xs mb-1"><TrendingDown size={12}/> 本月出帳</div>
+                <p className="text-lg md:text-xl font-bold text-[#44403c]">${stats.exp.toLocaleString()}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white/60 backdrop-blur-md border border-[#d6d3d1] rounded-xl p-5 shadow-sm">
+           <h4 className="font-bold text-[#a8a29e] text-xs tracking-widest uppercase mb-4 flex items-center gap-2"><BarChart3 size={14} /> 本月各週出帳</h4>
+           <div className="space-y-3">
+              {stats.weeklyExp.map((amt, idx) => {
+                 const pct = (amt / stats.maxWeeklyExp) * 100;
+                 return (
+                    <div key={idx} className="flex items-center gap-3">
+                       <span className="w-10 text-[#78716c] font-bold text-xs whitespace-nowrap">第{idx + 1}週</span>
+                       <div className="flex-1 h-3 bg-[#e7e5e4] rounded-full overflow-hidden flex items-center">
+                          <div className="h-full bg-[#57534e] rounded-full transition-all duration-500 ease-out" style={{ width: `${pct}%` }}></div>
+                       </div>
+                       <span className="w-12 text-right text-[#57534e] font-bold text-xs">${amt.toLocaleString()}</span>
+                    </div>
+                 );
+              })}
+           </div>
+        </div>
+
+        <div className="space-y-3">
+          <h4 className="font-bold text-[#a8a29e] text-xs tracking-widest uppercase flex items-center gap-2"><span className="w-2 h-2 bg-[#d6d3d1] rounded-full"></span> 帳本細目</h4>
+          {transactions.map(t => (
+            <div key={t.id} className="bg-white/70 p-3 md:p-4 rounded-xl border border-[#e7e5e4] shadow-sm flex items-center justify-between group hover:border-[#d6d3d1] transition-colors">
+              <div className="flex items-center gap-3">
+                <div className={`w-8 h-8 md:w-10 md:h-10 rounded-full flex items-center justify-center text-lg font-bold border border-transparent flex-shrink-0 ${t.type === 'income' ? 'bg-[#dcfce7] text-[#15803d]' : 'bg-[#fee2e2] text-[#be123c]'}`}>
+                  {t.type === 'income' ? '+' : '-'}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-[#57534e] truncate">{t.text}</p>
+                  <p className="text-[10px] text-[#a8a29e] font-bold">{t.date}</p>
+                </div>
+              </div>
+              <div className="text-right pl-2 flex-shrink-0">
+                  <p className={`font-bold text-lg text-[#57534e]`}>{Number(t.amount).toLocaleString()}</p>
+                  <button onClick={() => handleDelete(t.id)} className="text-xs text-[#d6d3d1] hover:text-[#f87171] font-bold underline decoration-2 transition-colors">刪除</button>
+              </div>
+            </div>
+          ))}
+          {transactions.length === 0 && (
+            <div className="text-center py-10 opacity-50">
+              <CloudRain size={40} className="mx-auto mb-2 text-[#d6d3d1]" />
+              <p className="text-[#a8a29e] text-sm font-bold">還沒有紀錄，去跟舟聊聊天吧</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (!user) return <div className="h-[100dvh] flex items-center justify-center bg-[#f0e6d2] text-[#78716c] font-bold animate-pulse">正在為熊準備手帳...</div>;
+
+  return (
+    <div className="h-[100dvh] w-full font-sans flex flex-col relative overflow-hidden text-[#44403c]">
+      <SeaBackground />
+      <div className="relative z-10 w-full max-w-md mx-auto flex flex-col h-full md:py-6">
+        <header className="flex-none flex items-center justify-between px-5 py-3 md:py-4 z-20">
+          <div className="flex items-center gap-3 md:gap-4">
+            <div className="w-12 h-12 md:w-16 md:h-16 bg-white rounded-full border-2 border-[#d6d3d1] shadow-md overflow-hidden flex items-center justify-center relative ring-2 ring-white/50 transform -rotate-3 transition-transform hover:rotate-0">
+              <Avatar type="ning" />
+            </div>
+            <div className="drop-shadow-sm">
+              <h1 className="text-lg md:text-xl font-black tracking-wider flex items-center gap-2 text-[#44403c]">舟 <Heart size={14} className="text-[#fca5a5] fill-[#fca5a5] animate-pulse"/></h1>
+              <p className="text-[10px] md:text-xs font-bold text-[#78716c] opacity-90">海邊小屋的日常</p>
+            </div>
+          </div>
+          <div className="flex bg-white/50 backdrop-blur-md rounded-full p-1 border border-[#e7e5e4] shadow-sm">
+            <button onClick={() => setView('chat')} className={`p-2 md:px-4 rounded-full flex items-center gap-2 transition-all ${view === 'chat' ? 'bg-[#57534e] text-[#f5f5f4] shadow-md' : 'text-[#78716c] hover:bg-white/50'}`}>
+              <MessageSquare size={16} />
+              <span className="text-xs font-bold hidden md:inline">對話</span>
+            </button>
+            <button onClick={() => setView('ledger')} className={`p-2 md:px-4 rounded-full flex items-center gap-2 transition-all ${view === 'ledger' ? 'bg-[#57534e] text-[#f5f5f4] shadow-md' : 'text-[#78716c] hover:bg-white/50'}`}>
+              <LayoutDashboard size={16} />
+              <span className="text-xs font-bold hidden md:inline">帳本</span>
+            </button>
+          </div>
+        </header>
+        <main className="flex-1 w-full relative min-h-0 px-2 pb-2 md:px-4 md:pb-4 overflow-hidden">
+          <DoodleCard className="h-full">
+             {view === 'chat' ? renderChatView() : renderLedgerView()}
+          </DoodleCard>
+        </main>
+      </div>
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 10px; }
+        @keyframes slideInFromTop {
+          0% { transform: translateY(-10px); opacity: 0; }
+          100% { transform: translateY(0); opacity: 1; }
+        }
+        .animate-in { animation: slideInFromTop 0.3s ease-out; }
+      `}</style>
+    </div>
+  );
+}
